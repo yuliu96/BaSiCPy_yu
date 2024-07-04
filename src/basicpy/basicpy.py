@@ -345,6 +345,7 @@ class BaSiC(BaseModel):
         else:
             flag_segmentation = False
             Ws = jnp.ones_like(Im)
+        print("aaaa")
 
         #Ws = Ws * self._perform_segmentation(Im)
 
