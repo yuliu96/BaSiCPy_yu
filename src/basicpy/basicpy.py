@@ -402,7 +402,7 @@ class BaSiC(BaseModel):
         # Initialize variables
         W = jnp.ones_like(Im2, dtype=jnp.float32) * Ws2
         if flag_segmentation:
-            W = W.at[Ws2 == 0].set(self.eplson)
+            W = W.at[Ws2 == 0].set(self.epsilon)
         W = W*W.size/W.sum()
         W_D = jnp.ones(Im2.shape[1:], dtype=jnp.float32)
         last_S = None
