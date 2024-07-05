@@ -466,7 +466,7 @@ class BaSiC(BaseModel):
             S = I_B.mean(axis = 0)-D_R
             mean_S = jnp.mean(S)
             S = S / mean_S  # flatfields
-            B = B * mean_S  # baseline
+            #B = B / mean_S  # baseline
             W = fitting_step.calc_weights(I_B, I_R) * Ws2
             W = W*W.size/W.sum()
             W_D = fitting_step.calc_dark_weights(D_R)
