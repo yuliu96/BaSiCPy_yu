@@ -361,7 +361,7 @@ class BaSiC(BaseModel):
             meanD = Im.mean(0)
             meanD = meanD/meanD.mean()
             W_meanD = JaxDCT.dct3d(meanD, norm = "ortho")
-            self._smoothness_flatfield = 1.5*jnp.sum(jnp.abs(W_meanD))/(400)*0.5
+            self._smoothness_flatfield = jnp.sum(jnp.abs(W_meanD))/(400)*0.5
         else:
             self._smoothness_flatfield = self.smoothness_flatfield
         if self.smoothness_darkfield is None:
