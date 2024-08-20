@@ -341,12 +341,12 @@ class BaSiC(BaseModel):
         if fitting_weight is not None:
             flag_segmentation = True
             Ws = device_put(fitting_weight).astype(jnp.float32)
-            Ws = self._resize_to_working_size(Ws)>0
+            Ws = self._resize_to_working_size(Ws) > 0
         else:
             flag_segmentation = False
             Ws = jnp.ones_like(Im)
 
-        #Ws = Ws * self._perform_segmentation(Im)
+        # Ws = Ws * self._perform_segmentation(Im)
 
         # Im2 and Ws2 will possibly be sorted
         if self.sort_intensity:
@@ -359,17 +359,19 @@ class BaSiC(BaseModel):
 
         if self.smoothness_flatfield is None:
             meanD = Im.mean(0)
-            meanD = meanD/meanD.mean()
-            W_meanD = JaxDCT.dct3d(meanD, norm = "ortho")
-            self._smoothness_flatfield = jnp.sum(jnp.abs(W_meanD))/(400)*0.5
+            meanD = meanD / meanD.mean()
+            W_meanD = JaxDCT.dct3d(meanD, norm="ortho")
+            self._smoothness_flatfield = jnp.sum(jnp.abs(W_meanD)) / (400) * 0.5
         else:
             self._smoothness_flatfield = self.smoothness_flatfield
         if self.smoothness_darkfield is None:
-            self._smoothness_darkfield = self._smoothness_flatfield*0.2
+            self._smoothness_darkfield = self._smoothness_flatfield * 0.2
         else:
             self._smoothness_darkfield = self.smoothness_darkfield
         if self.sparse_cost_darkfield is None:
-            self._sparse_cost_darkfield = self._smoothness_darkfield * self.sparse_cost_darkfield * 100
+            self._sparse_cost_darkfield = (
+                self._smoothness_darkfield * self.sparse_cost_darkfield * 100
+            )
         else:
             self._sparse_cost_darkfield = self.sparse_cost_darkfield
 
@@ -403,7 +405,7 @@ class BaSiC(BaseModel):
         W = jnp.ones_like(Im2, dtype=jnp.float32) * Ws2
         if flag_segmentation:
             W = W.at[Ws2 == 0].set(self.epsilon)
-        W = W*W.size/W.sum()
+        W = W * W.size / W.sum()
         W_D = jnp.ones(Im2.shape[1:], dtype=jnp.float32)
         last_S = None
         last_D = None
@@ -442,7 +444,7 @@ class BaSiC(BaseModel):
                 I_R,
             )
 
-            D_R = D_R+D_Z*S
+            D_R = D_R + D_Z * S
             logger.debug(f"single-step optimization score: {norm_ratio}.")
             logger.debug(f"mean of S: {float(jnp.mean(S))}.")
             self._score = norm_ratio
@@ -463,12 +465,12 @@ class BaSiC(BaseModel):
             self._D_Z = D_Z
 
             D = fitting_step.calc_darkfield(S, D_R, D_Z)  # darkfield
-            S = I_B.mean(axis = 0)-D_R
+            S = I_B.mean(axis=0) - D_R
             mean_S = jnp.mean(S)
             S = S / mean_S  # flatfields
-            #B = B / mean_S  # baseline
+            # B = B / mean_S  # baseline
             W = fitting_step.calc_weights(I_B, I_R) * Ws2
-            W = W*W.size/W.sum()
+            W = W * W.size / W.sum()
             W_D = fitting_step.calc_dark_weights(D_R)
 
             self._weight = W
