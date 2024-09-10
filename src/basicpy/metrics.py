@@ -64,7 +64,7 @@ def fourier_L0_norm(
 ):
     SF = dctn(image)
     xy = np.meshgrid(*[range(x) for x in image.shape], indexing="ij")
-    outside_radius = (np.sum(np.array(xy) ** 2, axis=0) > fourier_radius**2) 
+    outside_radius = np.sum(np.array(xy) ** 2, axis=0) > fourier_radius**2
     if exclude_edges:
         outside_radius = outside_radius & (xy[0] > 0) & (xy[1] > 0)
     L0_norm = np.sum(SF[outside_radius] > threshold) / np.sum(outside_radius)
