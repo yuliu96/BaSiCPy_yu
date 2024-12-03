@@ -427,8 +427,13 @@ class ApproximateFit(BaseFit):
             #    D_Z = 0
             # else:
             #    D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / denominator
+            D_Z = jnp.where(
+                jnp.equal(denominator, 0),
+                0,
+                (B_sq_sum * A_sum - B_sum * BA_sum) / denominator,
+            )
 
-            D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / (denominator + 1e-3)
+            # D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / (denominator + 1e-3)
 
             D_Z = jnp.clip(D_Z, 0, self.D_Z_max / jnp.mean(S))
 
