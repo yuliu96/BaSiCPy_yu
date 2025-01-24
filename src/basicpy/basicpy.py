@@ -358,7 +358,8 @@ class BaSiC(BaseModel):
         else:
             Im2 = Im
             Ws2 = Ws
-
+        print(self.smoothness_flatfield)
+        print(self.smoothness_darkfield)
         if self.smoothness_flatfield is None:
             meanD = Im.mean(0)
             meanD = meanD / meanD.mean()
