@@ -338,7 +338,6 @@ class BaSiC(BaseModel):
         logger.info("=== BaSiC fit started ===")
         start_time = time.monotonic()
 
-        # images = (images - images.min()) / (images.max() - images.min())
         Im = self._resize_to_working_size(images)
 
         if fitting_weight is not None:
@@ -408,7 +407,7 @@ class BaSiC(BaseModel):
         if flag_segmentation:
             W = W.at[Ws2 == 0].set(self.epsilon)
         W = W * W.size / W.sum()
-        W_D = jnp.zeros(Im2.shape[1:], dtype=jnp.float32)
+        W_D = jnp.ones(Im2.shape[1:], dtype=jnp.float32)
         last_S = None
         last_D = None
         S = None
@@ -457,26 +456,28 @@ class BaSiC(BaseModel):
             self._score = norm_ratio
             if not converged:
                 logger.debug("single-step optimization did not converge.")
-            # if S.max() == 0:
-            #     logger.error(
-            #         "Estimated flatfield is zero. "
-            #         + "Please try to decrease smoothness_darkfield."
-            #     )
-            #     raise RuntimeError(
-            #         "Estimated flatfield is zero. "
-            #         + "Please try to decrease smoothness_darkfield."
-            #     )
+            if S.max() == 0:
+                logger.error(
+                    "Estimated flatfield is zero. "
+                    + "Please try to decrease smoothness_darkfield."
+                )
+                raise RuntimeError(
+                    "Estimated flatfield is zero. "
+                    + "Please try to decrease smoothness_darkfield."
+                )
             self._S = S
             self._D_R = D_R
             self._B = B
             self._D_Z = D_Z
 
             D = fitting_step.calc_darkfield(S, D_R, D_Z)  # darkfield
-            W = fitting_step.calc_weights(I_B, I_R) * Ws2
-            W_D = fitting_step.calc_dark_weights(D_R)
             S = I_B.mean(axis=0) - D_R
-            S = S / jnp.mean(S)  # flatfields
+            mean_S = jnp.mean(S)
+            S = S / mean_S  # flatfields
             # B = B / mean_S  # baseline
+            W = fitting_step.calc_weights(I_B, I_R) * Ws2
+            W = W * W.size / W.sum()
+            W_D = fitting_step.calc_dark_weights(D_R)
 
             self._weight = W
             self._weight_dark = W_D
@@ -485,14 +486,13 @@ class BaSiC(BaseModel):
             logger.debug(f"Iteration {i} finished.")
             if last_S is not None:
                 mad_flatfield = jnp.sum(jnp.abs(S - last_S)) / jnp.sum(np.abs(last_S))
-                temp_diff = jnp.sum(jnp.abs(S - last_S))
-                if temp_diff < 1e-7:
-                    mad_darkfield = 0
+                if self.get_darkfield:
+                    mad_darkfield = jnp.sum(jnp.abs(D - last_D)) / max(
+                        jnp.sum(jnp.abs(last_D)), 1
+                    )  # assumes the amplitude of darkfield is more than 1
+                    self._reweight_score = max(mad_flatfield, mad_darkfield)
                 else:
-                    mad_darkfield = temp_diff / (
-                        jnp.maximum(jnp.sum(jnp.abs(last_S)), 1e-6)
-                    )
-                self._reweight_score = jnp.maximum(mad_flatfield, mad_darkfield)
+                    self._reweight_score = mad_flatfield
                 logger.debug(f"reweighting score: {self._reweight_score}")
                 logger.info(
                     f"Iteration {i} elapsed time: "

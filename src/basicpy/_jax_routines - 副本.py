@@ -6,7 +6,7 @@ from jax import jit, lax
 from jax import numpy as jnp
 from jax.tree_util import register_pytree_node_class
 from pydantic import BaseModel, Field, PrivateAttr
-import copy
+
 from basicpy.tools.dct_tools import JaxDCT
 
 idct2d, dct2d, idct3d, dct3d = JaxDCT.idct2d, JaxDCT.dct2d, JaxDCT.idct3d, JaxDCT.dct3d
@@ -404,50 +404,52 @@ class ApproximateFit(BaseFit):
         B = jnp.maximum(B, 0)
 
         if self.get_darkfield:
-            B_valid = B < 1e7
+            B_valid = B < 1
 
-            S_inmask = S.reshape(-1) >= jnp.mean(S)
-            S_outmask = S.reshape(-1) < jnp.mean(S)
+            S_inmask = S.reshape(-1) > jnp.mean(S) - 1e-6
+            S_outmask = S.reshape(-1) < jnp.mean(S) + 1e-6
 
-            R_0 = copy.deepcopy(R)
-            R_1 = copy.deepcopy(R)
+            A = (
+                jnp.sum(R * S_inmask[newax, ...] * B_valid[..., newax], axis=1)
+                / (1 + jnp.sum(S_inmask))
+                - jnp.sum(R * S_outmask[newax, ...] * B_valid[..., newax], axis=1)
+                / (1 + jnp.sum(S_outmask))
+            ) / jnp.clip(jnp.mean(R), 1e-6, None)
 
-            R_0 = jnp.where(S_inmask[newax, ...] * B_valid[..., newax], R_0, jnp.nan)
-            R_1 = jnp.where(S_outmask[newax, ...] * B_valid[..., newax], R_1, jnp.nan)
+            B_sq_sum = jnp.sum(B**2 * B_valid)
+            B_sum = jnp.sum(B * B_valid)
+            A_sum = jnp.sum(A)
+            BA_sum = jnp.sum(B * A * B_valid)
+            denominator = B_sum * A_sum - BA_sum * jnp.sum(B_valid)
 
-            B1_coeff = (jnp.nanmean(R_0, 1) - jnp.nanmean(R_1, 1)) / (
-                jnp.mean(R) + 1e-6
+            # limit B1_offset: 0<B1_offset<B1_uplimit
+            # if jnp.equal(denominator, 0).item():
+            #    D_Z = 0
+            # else:
+            #    D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / denominator
+            D_Z = jnp.where(
+                jnp.equal(denominator, 0),
+                0,
+                (B_sq_sum * A_sum - B_sum * BA_sum) / denominator,
             )
-            B1_coeff = jnp.where(B_valid, B1_coeff, jnp.nan)
 
-            k = jnp.sum(B_valid)
+            # D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / (denominator + 1e-3)
 
-            B_nan = copy.deepcopy(B)
-            B_nan = jnp.where(B_valid, B_nan, jnp.nan)
+            D_Z = jnp.clip(D_Z, 0, self.D_Z_max / jnp.mean(S))
 
-            temp1 = jnp.nansum(B_nan**2)
-            temp2 = jnp.nansum(B_nan)
-            temp3 = jnp.nansum(B1_coeff)
-            temp4 = jnp.nansum(B_nan * B1_coeff)
-            temp5 = temp2 * temp3 - k * temp4
+            Z = D_Z * (np.mean(S) - S)
 
-            D_Z = jnp.where(temp5 == 0, 0, (temp1 * temp3 - temp2 * temp4) / temp5)
-            D_Z = jnp.maximum(D_Z, 0)
-            D_Z = jnp.minimum(D_Z, Im.min() / (jnp.mean(S) + 1e-6))
-            Z = D_Z * jnp.mean(S) - D_Z * S.reshape(-1)
+            D_R = (R * B_valid[:, newax]).sum(axis=0).reshape(
+                mm, nn
+            ) / B_valid.sum() - (B * B_valid).sum() / B_valid.sum() * S
+            D_R = D_R - jnp.mean(D_R) - Z
 
-            R_nan = jnp.where(B_valid[:, None], R, jnp.nan)
-
-            A1_offset = jnp.nanmean(R_nan, 0) - jnp.nanmean(B_nan) * S.reshape(-1)
-            A1_offset = A1_offset - jnp.mean(A1_offset)
-            D_R = A1_offset - jnp.mean(A1_offset) - Z
-
-            D_R = dct2d(D_R.reshape(mm, nn))
+            # smooth A_offset
+            D_R = dct2d(D_R)
             D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
             D_R = idct2d(D_R)
             D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
-
-            D_R = D_R + Z.reshape(mm, nn)
+            D_R = D_R + Z
 
         fit_residual = Im - I_B - I_R
         Y = Y + mu * fit_residual
@@ -511,7 +513,7 @@ class ApproximateFit(BaseFit):
         I_R = I_R[:, 0, ...]
         XE_norm = I_R / (jnp.mean(I_B, axis=(1, 2))[:, newax, newax] + 1e-6)
         weight = jnp.ones_like(I_R) / (jnp.abs(XE_norm) + self.epsilon)
-        weight = weight * weight.size / weight.sum()
+        weight = weight / jnp.mean(weight)
         return weight[:, newax, ...]
 
     def calc_dark_weights(self, D_R):
@@ -527,5 +529,4 @@ class ApproximateFit(BaseFit):
         return weight[:, newax, ...]
 
     def calc_darkfield(_self, S, D_R, D_Z):
-        return D_R
         return D_R + D_Z * (1 + S)
