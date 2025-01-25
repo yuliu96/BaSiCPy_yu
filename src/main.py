@@ -46,9 +46,10 @@ basic = BaSiC(
     sort_intensity=False,
     max_reweight_iterations=5,
     smoothness_flatfield=0.990265494633178,
-    smoothness_darkfield=0.0098053098926636,
+    smoothness_darkfield=0.098053098926636,
 )
 # basic.fit(fi_distorted)
+fi_distorted = fi_distorted - fi_distorted.min()
 basic.fit(
     images=fi_distorted,
     fitting_weight=~fi_seg,

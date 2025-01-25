@@ -404,7 +404,6 @@ class ApproximateFit(BaseFit):
         B = jnp.maximum(B, 0)
 
         if self.get_darkfield:
-            B_valid = B < 1e7
 
             S_inmask = S.reshape(-1) >= jnp.mean(S)
             S_outmask = S.reshape(-1) < jnp.mean(S)
@@ -412,34 +411,29 @@ class ApproximateFit(BaseFit):
             R_0 = copy.deepcopy(R)
             R_1 = copy.deepcopy(R)
 
-            R_0 = jnp.where(S_inmask[newax, ...] * B_valid[..., newax], R_0, jnp.nan)
-            R_1 = jnp.where(S_outmask[newax, ...] * B_valid[..., newax], R_1, jnp.nan)
+            R_0 = jnp.where(S_inmask[newax, ...], R_0, jnp.nan)
+            R_1 = jnp.where(S_outmask[newax, ...], R_1, jnp.nan)
 
             B1_coeff = (jnp.nanmean(R_0, 1) - jnp.nanmean(R_1, 1)) / (
                 jnp.mean(R) + 1e-6
             )
-            B1_coeff = jnp.where(B_valid, B1_coeff, jnp.nan)
 
-            k = jnp.sum(B_valid)
+            k = len(B)
 
-            B_nan = copy.deepcopy(B)
-            B_nan = jnp.where(B_valid, B_nan, jnp.nan)
-
-            temp1 = jnp.nansum(B_nan**2)
-            temp2 = jnp.nansum(B_nan)
+            temp1 = jnp.nansum(B**2)
+            temp2 = jnp.nansum(B)
             temp3 = jnp.nansum(B1_coeff)
-            temp4 = jnp.nansum(B_nan * B1_coeff)
+            temp4 = jnp.nansum(B * B1_coeff)
             temp5 = temp2 * temp3 - k * temp4
 
             D_Z = jnp.where(temp5 == 0, 0, (temp1 * temp3 - temp2 * temp4) / temp5)
             D_Z = jnp.maximum(D_Z, 0)
             D_Z = jnp.minimum(D_Z, Im.min() / (jnp.mean(S) + 1e-6))
+
             Z = D_Z * jnp.mean(S) - D_Z * S.reshape(-1)
 
-            R_nan = jnp.where(B_valid[:, None], R, jnp.nan)
-
-            A1_offset = jnp.nanmean(R_nan, 0) - jnp.nanmean(B_nan) * S.reshape(-1)
-            A1_offset = A1_offset - jnp.mean(A1_offset)
+            A1_offset = jnp.nanmean(R, 0) - jnp.nanmean(B) * S.reshape(-1)
+            # A1_offset = A1_offset - jnp.mean(A1_offset)
             D_R = A1_offset - jnp.mean(A1_offset) - Z
 
             D_R = dct2d(D_R.reshape(mm, nn))

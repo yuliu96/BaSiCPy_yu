@@ -457,15 +457,15 @@ class BaSiC(BaseModel):
             self._score = norm_ratio
             if not converged:
                 logger.debug("single-step optimization did not converge.")
-            # if S.max() == 0:
-            #     logger.error(
-            #         "Estimated flatfield is zero. "
-            #         + "Please try to decrease smoothness_darkfield."
-            #     )
-            #     raise RuntimeError(
-            #         "Estimated flatfield is zero. "
-            #         + "Please try to decrease smoothness_darkfield."
-            #     )
+            if S.max() == 0:
+                logger.error(
+                    "Estimated flatfield is zero. "
+                    + "Please try to decrease smoothness_darkfield."
+                )
+                raise RuntimeError(
+                    "Estimated flatfield is zero. "
+                    + "Please try to decrease smoothness_darkfield."
+                )
             self._S = S
             self._D_R = D_R
             self._B = B
