@@ -6,7 +6,7 @@ from jax import jit, lax
 from jax import numpy as jnp
 from jax.tree_util import register_pytree_node_class
 from pydantic import BaseModel, Field, PrivateAttr
-
+import copy
 from basicpy.tools.dct_tools import JaxDCT
 
 idct2d, dct2d, idct3d, dct3d = JaxDCT.idct2d, JaxDCT.dct2d, JaxDCT.idct3d, JaxDCT.dct3d
@@ -63,14 +63,16 @@ class BaseFit(BaseModel):
 
     def _cond(self, vals):
         k = vals[0]
+
         fit_residual = vals[-2]
         value_diff = vals[-1]
         norm_ratio = jnp.linalg.norm(fit_residual.ravel(), ord=2) / self.image_norm
+
         conv = jnp.any(
             jnp.array(
                 [
                     norm_ratio > self.optimization_tol,
-                    value_diff > self.optimization_tol_diff,
+                    norm_ratio > self.optimization_tol,
                 ]
             )
         )
@@ -90,6 +92,7 @@ class BaseFit(BaseModel):
         W,
         W_D,
         S,
+        S_hat,
         D_R,
         D_Z,
         B,
@@ -102,7 +105,7 @@ class BaseFit(BaseModel):
         fit_residual = jnp.ones(Im.shape, dtype=jnp.float32) * jnp.inf
         value_diff = jnp.inf
 
-        vals = (0, S, D_R, D_Z, I_B, I_R, B, Y, mu, fit_residual, value_diff)
+        vals = (0, S, S_hat, D_R, D_Z, I_B, I_R, B, Y, mu, fit_residual, value_diff)
         step = partial(
             self._step,
             Im,
@@ -113,9 +116,9 @@ class BaseFit(BaseModel):
         #            vals = step(vals)
         vals = lax.while_loop(self._cond, step, vals)
 
-        k, S, D_R, D_Z, I_B, I_R, B, Y, mu, fit_residual, value_diff = vals
+        k, S, S_hat, D_R, D_Z, I_B, I_R, B, Y, mu, fit_residual, value_diff = vals
         norm_ratio = jnp.linalg.norm(fit_residual.ravel(), ord=2) / self.image_norm
-        return S, D_R, D_Z, I_B, I_R, B, norm_ratio, k < self.max_iterations
+        return S, S_hat, D_R, D_Z, I_B, I_R, B, norm_ratio, k < self.max_iterations
 
     @jit
     def _fit_baseline_jit(
@@ -155,6 +158,7 @@ class BaseFit(BaseModel):
         W,
         W_D,
         S,
+        S_hat,
         D_R,
         D_Z,
         B,
@@ -177,7 +181,7 @@ class BaseFit(BaseModel):
             raise ValueError(
                 "darkfield weight must have the same shape as images.shape[1:]"
             )
-        return self._fit_jit(Im, W, W_D, S, D_R, D_Z, B, I_B, I_R)
+        return self._fit_jit(Im, W, W_D, S, S_hat, D_R, D_Z, B, I_B, I_R)
 
     def fit_baseline(
         self,
@@ -373,83 +377,133 @@ class ApproximateFit(BaseFit):
         dark_weight,
         vals,
     ):
-        # k, S, D_R, D_Z, I_R, B, Y, mu, fit_residual, value_diff = vals
-        k, S, D_R, D_Z, I_B, I_R, B, Y, mu, fit_residual, value_diff = vals
+
+        k, S, S_hat, D_R, D_Z, I_B, I_R, B, Y, mu, fit_residual, _ = vals
         # approximate fitting only accepts two-dimensional images.
         # XXX better coding?
 
-        ss, _, mm, nn = Im.shape
-        Im = Im[:, 0, ...].reshape(ss, -1)
-        weight = weight[:, 0, ...].reshape(ss, -1)
-        D_R = D_R[0]
-        I_R = I_R[:, 0, ...].reshape(ss, -1)
-        I_B = I_B[:, 0, ...].reshape(ss, -1)
-        Y = Y[:, 0, ...].reshape(ss, -1)
+        s_s, _, s_m, s_n = Im.shape
+        Im = Im[:, 0, ...].reshape(s_s, -1)
+        weight = weight[:, 0, ...].reshape(s_s, -1)
+        D_R = D_R[0, ...]
+        I_R = I_R[:, 0, ...].reshape(s_s, -1)
+        Y = Y[:, 0, ...].reshape(s_s, -1)
 
-        temp_W = Im - I_R + Y / mu / self._ent1
-        #    plt.imshow(temp_W[0]);plt.show()
-        #    print(type(temp_W))
+        S = idct2d(S_hat)[newax, ...]
+
+        I_B = S * B[:, newax, newax] + D_R[newax, ...]
+        I_B = I_B.reshape(s_s, -1)
+
+        temp_W = (Im - I_R - I_B + Y / mu) / self._ent1
         temp_W = jnp.mean(temp_W, axis=0)
-        S_hat = dct2d(temp_W.reshape(mm, nn))
+        S_hat = S_hat + dct2d(temp_W.reshape(s_m, s_n))
         S_hat = _jshrinkage(S_hat, self.smoothness_flatfield / (self._ent1 * mu))
         S = idct2d(S_hat)
-        S = S / jnp.clip(S.mean(), 1e-6, None)
 
         I_B = S[newax, ...] * B[:, newax, newax] + D_R[newax, ...]
-        I_B = I_B.reshape(ss, -1)
-        I_R = Im - I_B + Y / mu / self._ent1
+
+        I_B = I_B.reshape(s_s, -1)
+        I_R = I_R + (Im - I_B - I_R + (1 / mu) * Y) / self._ent1
         I_R = _jshrinkage(I_R, weight / (self._ent1 * mu))
         R = Im - I_R
-        B = jnp.mean(R, axis=1)
+        B = jnp.mean(R, axis=1) / jnp.mean(R)
         B = jnp.maximum(B, 0)
-
+        """
         if self.get_darkfield:
-            B_valid = B < 1
 
-            S_inmask = S.reshape(-1) > jnp.mean(S) - 1e-6
-            S_outmask = S.reshape(-1) < jnp.mean(S) + 1e-6
+            S_inmask = S.reshape(-1) >= jnp.mean(S)
+            S_outmask = S.reshape(-1) < jnp.mean(S)
 
-            A = (
-                jnp.sum(R * S_inmask[newax, ...] * B_valid[..., newax], axis=1)
-                / (1 + jnp.sum(S_inmask))
-                - jnp.sum(R * S_outmask[newax, ...] * B_valid[..., newax], axis=1)
-                / (1 + jnp.sum(S_outmask))
-            ) / jnp.clip(jnp.mean(R), 1e-6, None)
+            R_0 = copy.deepcopy(R)
+            R_1 = copy.deepcopy(R)
 
-            B_sq_sum = jnp.sum(B**2 * B_valid)
-            B_sum = jnp.sum(B * B_valid)
-            A_sum = jnp.sum(A)
-            BA_sum = jnp.sum(B * A * B_valid)
-            denominator = B_sum * A_sum - BA_sum * jnp.sum(B_valid)
+            R_0 = jnp.where(S_inmask[newax, ...], R_0, jnp.nan)
+            R_1 = jnp.where(S_outmask[newax, ...], R_1, jnp.nan)
 
-            # limit B1_offset: 0<B1_offset<B1_uplimit
-            # if jnp.equal(denominator, 0).item():
-            #    D_Z = 0
-            # else:
-            #    D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / denominator
-            D_Z = jnp.where(
-                jnp.equal(denominator, 0),
-                0,
-                (B_sq_sum * A_sum - B_sum * BA_sum) / denominator,
+            B1_coeff = (jnp.nanmean(R_0, 1) - jnp.nanmean(R_1, 1)) / (
+                jnp.mean(R) + 1e-6
             )
 
-            # D_Z = (B_sq_sum * A_sum - B_sum * BA_sum) / (denominator + 1e-3)
+            k = len(B)
 
-            D_Z = jnp.clip(D_Z, 0, self.D_Z_max / jnp.mean(S))
+            temp1 = jnp.nansum(B**2)
+            temp2 = jnp.nansum(B)
+            temp3 = jnp.nansum(B1_coeff)
+            temp4 = jnp.nansum(B * B1_coeff)
+            temp5 = temp2 * temp3 - k * temp4
 
-            Z = D_Z * (np.mean(S) - S)
+            D_Z = jnp.where(temp5 == 0, 0, (temp1 * temp3 - temp2 * temp4) / temp5)
+            D_Z = jnp.maximum(D_Z, 0)
+            D_Z = jnp.minimum(D_Z, Im.min() / (jnp.mean(S) + 1e-6))
 
-            D_R = (R * B_valid[:, newax]).sum(axis=0).reshape(
-                mm, nn
-            ) / B_valid.sum() - (B * B_valid).sum() / B_valid.sum() * S
-            D_R = D_R - jnp.mean(D_R) - Z
+            Z = D_Z * jnp.mean(S) - D_Z * S.reshape(-1)
 
-            # smooth A_offset
-            D_R = dct2d(D_R)
+            A1_offset = jnp.nanmean(R, 0) - jnp.nanmean(B) * S.reshape(-1)
+            # A1_offset = A1_offset - jnp.mean(A1_offset)
+            D_R = A1_offset - jnp.mean(A1_offset) - Z
+
+            D_R = dct2d(D_R.reshape(mm, nn))
             D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
             D_R = idct2d(D_R)
             D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
-            D_R = D_R + Z
+
+            D_R = D_R + Z.reshape(mm, nn)
+        """
+
+        if self.get_darkfield:
+
+            validA1coeff_idx = B < 1
+
+            S_inmask = S.reshape(-1) >= jnp.mean(S)
+            S_outmask = S.reshape(-1) < jnp.mean(S)
+
+            R_0 = copy.deepcopy(R)
+            R_1 = copy.deepcopy(R)
+
+            R_0 = jnp.where(
+                S_inmask[newax, ...] * validA1coeff_idx[..., newax], R_0, jnp.nan
+            )
+            R_1 = jnp.where(
+                S_outmask[newax, ...] * validA1coeff_idx[..., newax], R_1, jnp.nan
+            )
+
+            B1_coeff = (jnp.nanmean(R_0, 1) - jnp.nanmean(R_1, 1)) / (
+                jnp.mean(R) + 1e-6
+            )
+
+            k = jnp.sum(validA1coeff_idx)
+
+            B_nan = jnp.where(validA1coeff_idx, B, jnp.nan)
+
+            temp1 = jnp.nansum(B_nan**2)
+            temp2 = jnp.nansum(B_nan)
+            temp3 = jnp.nansum(B1_coeff)
+            temp4 = jnp.nansum(B_nan * B1_coeff)
+            temp1 = jnp.nan_to_num(temp1)
+            temp2 = jnp.nan_to_num(temp2)
+            temp3 = jnp.nan_to_num(temp3)
+            temp4 = jnp.nan_to_num(temp4)
+            temp5 = temp2 * temp3 - k * temp4
+
+            D_Z = jnp.where(temp5 == 0, 0, (temp1 * temp3 - temp2 * temp4) / temp5)
+            D_Z = jnp.maximum(D_Z, 0)
+            D_Z = jnp.minimum(D_Z, Im.min())
+
+            Z = D_Z * jnp.mean(S) - D_Z * S.reshape(-1)
+
+            R_nan = jnp.where(validA1coeff_idx[:, None], R, jnp.nan)
+
+            A1_offset = jnp.nanmean(R_nan, 0) - jnp.nanmean(B_nan) * S.reshape(-1)  # Z
+            # A1_offset = jnp.nan_to_num(A1_offset)
+            A1_offset = A1_offset - jnp.nanmean(A1_offset)
+            D_R = A1_offset - D_Z * (jnp.mean(S) - S.reshape(-1))
+
+            D_R = dct2d(D_R.reshape(s_m, s_n))
+            D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
+            D_R = idct2d(D_R)
+            D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
+
+            D_R = D_R + D_Z
 
         fit_residual = Im - I_B - I_R
         Y = Y + mu * fit_residual
@@ -465,14 +519,15 @@ class ApproximateFit(BaseFit):
         return (
             k + 1,
             S,
+            S_hat,
             D_R,
             D_Z,
-            I_B.reshape(ss, 1, mm, nn),
-            I_R.reshape(ss, 1, mm, nn),
+            I_B.reshape(s_s, 1, s_m, s_n),
+            I_R.reshape(s_s, 1, s_m, s_n),
             B,
-            Y.reshape(ss, 1, mm, nn),
+            Y.reshape(s_s, 1, s_m, s_n),
             mu,
-            fit_residual.reshape(ss, 1, mm, nn),
+            fit_residual.reshape(s_s, 1, s_m, s_n),
             0.0,
         )
 
@@ -508,12 +563,25 @@ class ApproximateFit(BaseFit):
         fit_residual = fit_residual[:, newax, ...]
         return (k + 1, I_R, B, Y, mu, fit_residual, 0.0)
 
-    def calc_weights(self, I_B, I_R):
+    def calc_weights(
+        self,
+        I_B,
+        I_R,
+        Ws2,
+        epsilon,
+    ):
         I_B = I_B[:, 0, ...]
         I_R = I_R[:, 0, ...]
         XE_norm = I_R / (jnp.mean(I_B, axis=(1, 2))[:, newax, newax] + 1e-6)
         weight = jnp.ones_like(I_R) / (jnp.abs(XE_norm) + self.epsilon)
-        weight = weight / jnp.mean(weight)
+
+        weight = jnp.where(
+            Ws2[:, 0, ...] == 0,
+            weight * epsilon,
+            weight,
+        )
+        weight = weight * weight.size / weight.sum()
+
         return weight[:, newax, ...]
 
     def calc_dark_weights(self, D_R):
@@ -529,4 +597,4 @@ class ApproximateFit(BaseFit):
         return weight[:, newax, ...]
 
     def calc_darkfield(_self, S, D_R, D_Z):
-        return D_R + D_Z * (1 + S)
+        return D_R

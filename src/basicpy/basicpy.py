@@ -2,7 +2,7 @@
 
 # Core modules
 from __future__ import annotations
-
+import tqdm
 import json
 import logging
 import os
@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import copy
 import jax.numpy as jnp
+
+from basicpy.tools.dct_tools import JaxDCT
+
+idct2d, dct2d, idct3d, dct3d = JaxDCT.idct2d, JaxDCT.dct2d, JaxDCT.idct3d, JaxDCT.dct3d
 
 # 3rd party modules
 import numpy as np
@@ -108,10 +112,10 @@ class BaSiC(BaseModel):
         description="When True, will estimate the darkfield shading component.",
     )
     smoothness_flatfield: float = Field(
-        1.0, description="Weight of the flatfield term in the Lagrangian."
+        None, description="Weight of the flatfield term in the Lagrangian."
     )
     smoothness_darkfield: float = Field(
-        1.0, description="Weight of the darkfield term in the Lagrangian."
+        None, description="Weight of the darkfield term in the Lagrangian."
     )
     sparse_cost_darkfield: float = Field(
         0.01, description="Weight of the darkfield sparse term in the Lagrangian."
@@ -342,9 +346,11 @@ class BaSiC(BaseModel):
         Im = self._resize_to_working_size(images)
 
         if fitting_weight is not None:
+
             flag_segmentation = True
             Ws = device_put(fitting_weight).astype(jnp.float32)
             Ws = self._resize_to_working_size(Ws) > 0
+
         else:
             flag_segmentation = False
             Ws = jnp.ones_like(Im)
@@ -367,7 +373,7 @@ class BaSiC(BaseModel):
         else:
             self._smoothness_flatfield = self.smoothness_flatfield
         if self.smoothness_darkfield is None:
-            self._smoothness_darkfield = self._smoothness_flatfield * 0.2
+            self._smoothness_darkfield = self._smoothness_flatfield * 0.1
         else:
             self._smoothness_darkfield = self.smoothness_darkfield
         if self.sparse_cost_darkfield is None:
@@ -423,33 +429,38 @@ class BaSiC(BaseModel):
         for i in range(self.max_reweight_iterations):
             logger.debug(f"reweighting iteration {i}")
             if self.fitting_mode == FittingMode.approximate:
-                S = jnp.zeros(Im2.shape[1:], dtype=jnp.float32)
+                S = jnp.ones(Im2.shape[1:], dtype=jnp.float32)
             else:
                 S = jnp.median(Im2, axis=0)
+            S_hat = dct2d(jnp.ones(Im2.shape[-2:], dtype=jnp.float32))
             D_R = jnp.zeros(Im2.shape[1:], dtype=jnp.float32)
             D_Z = 0.0
             if self.fitting_mode == FittingMode.approximate:
-                if flag_segmentation:
-                    B = copy.deepcopy(Im2)
-                    B = B.at[Ws2 == 0].set(jnp.nan)
-                    B = jnp.squeeze(jnp.nanmean(B, axis=(-2, -1)))
-                else:
-                    B = jnp.squeeze(jnp.mean(Im2, axis=(-2, -1)))
+                B = copy.deepcopy(Im2)
+                B = B.at[Ws2 == 0].set(jnp.nan)
+                B = jnp.squeeze(jnp.nanmean(B, axis=(-2, -1))) / jnp.nanmean(B)
+                B = jnp.nan_to_num(B)
             else:
                 B = jnp.ones(Im2.shape[0], dtype=jnp.float32)
+
             I_R = jnp.zeros(Im2.shape, dtype=jnp.float32)
-            I_B = jnp.zeros(Im2.shape, dtype=jnp.float32)
-            S, D_R, D_Z, I_B, I_R, B, norm_ratio, converged = fitting_step.fit(
+            I_B = (S * B[:, newax, newax])[:, newax, ...]
+
+            S, S_hat, D_R, D_Z, I_B, I_R, B, norm_ratio, converged = fitting_step.fit(
                 Im2,
                 W,
                 W_D,
                 S,
+                S_hat,
                 D_R,
                 D_Z,
                 B,
                 I_B,
                 I_R,
             )
+
+            S = I_B.mean(axis=0) - D_R
+            S = S / jnp.mean(S)  # flatfields
 
             D_R = D_R + D_Z * S
             logger.debug(f"single-step optimization score: {norm_ratio}.")
@@ -472,10 +483,14 @@ class BaSiC(BaseModel):
             self._D_Z = D_Z
 
             D = fitting_step.calc_darkfield(S, D_R, D_Z)  # darkfield
-            W = fitting_step.calc_weights(I_B, I_R) * Ws2
+            W = fitting_step.calc_weights(
+                I_B,
+                I_R,
+                Ws2,
+                self.epsilon,
+            )
             W_D = fitting_step.calc_dark_weights(D_R)
-            S = I_B.mean(axis=0) - D_R
-            S = S / jnp.mean(S)  # flatfields
+
             # B = B / mean_S  # baseline
 
             self._weight = W
@@ -502,6 +517,7 @@ class BaSiC(BaseModel):
                 if self._reweight_score <= self.reweighting_tol:
                     logger.info("Reweighting converged.")
                     break
+
             if i == self.max_reweight_iterations - 1:
                 logger.warning("Reweighting did not converge.")
             last_S = S
@@ -538,6 +554,7 @@ class BaSiC(BaseModel):
                 self._weight = W
                 self._residual = I_R
                 logger.debug(f"Iteration {i} finished.")
+
         self._flatfield_small = S
         self._darkfield_small = D
         self.flatfield = skimage_resize(S, images.shape[1:])
@@ -825,7 +842,7 @@ class BaSiC(BaseModel):
                 return np.inf
 
         cost_coarse = []
-        for i in flatfield_pool_coarse:
+        for i in tqdm.tqdm(flatfield_pool_coarse, desc="coarse-level search: "):
             params = {
                 "smoothness_flatfield": i,
                 "smoothness_darkfield": 0,  # 0.1 * i if self.get_darkfield else 0
@@ -833,6 +850,7 @@ class BaSiC(BaseModel):
             }
             a = fit_and_calc_entropy(params)
             cost_coarse.append(a)
+
         cost_coarse = np.stack(cost_coarse)
         best_ind = np.argmin(cost_coarse)
         if best_ind == len(cost_coarse) - 1:
@@ -846,9 +864,14 @@ class BaSiC(BaseModel):
                 second_best_ind = best_ind + 1
         best = flatfield_pool_coarse[best_ind]
         second_best = flatfield_pool_coarse[second_best_ind]
-        flatfield_pool_narrow = flatfield_pool[
-            (flatfield_pool >= second_best) * (flatfield_pool <= best)
-        ]
+        if second_best < best:
+            flatfield_pool_narrow = flatfield_pool[
+                (flatfield_pool >= second_best) * (flatfield_pool <= best)
+            ]
+        else:
+            flatfield_pool_narrow = flatfield_pool[
+                (flatfield_pool >= best) * (flatfield_pool <= second_best)
+            ]
         cost_narrow = np.zeros(len(flatfield_pool_narrow))
         cost_narrow[0] = cost_coarse[flatfield_pool_narrow[0] == flatfield_pool_coarse][
             0
@@ -857,10 +880,11 @@ class BaSiC(BaseModel):
             flatfield_pool_narrow[-1] == flatfield_pool_coarse
         ][0]
         ind = 1
-        for i in flatfield_pool_narrow[1:-1]:
+        for i in tqdm.tqdm(flatfield_pool_narrow[1:-1], desc="fine-level search: "):
             params = {
                 "smoothness_flatfield": i,
                 "smoothness_darkfield": 0,
+                # "get_darkfield": False,
             }
             a = fit_and_calc_entropy(params)
             cost_narrow[ind] = a
@@ -868,7 +892,13 @@ class BaSiC(BaseModel):
         self.__dict__.update(
             {"smoothness_flatfield": flatfield_pool_narrow[np.argmin(cost_narrow)]}
         )
-        print({"smoothness_flatfield": flatfield_pool_narrow[np.argmin(cost_narrow)]})
+        if not self.get_darkfield:
+            print("Autotune is done.")
+            print("Best smoothness_flatfield = {}.".format(self.smoothness_flatfield))
+        else:
+            print("Autotune is done.")
+            print("Best smoothness_flatfield = {}.".format(self.smoothness_flatfield))
+            print("Best smoothness_darkfield = {}.".format(self.smoothness_darkfield))
         return
 
     def autotune_hillclimbing(

@@ -41,20 +41,23 @@ fi_distorted = io.loadmat("D:/BaSiC/simulationstudy/fi_distorted.mat")[
 
 
 basic = BaSiC(
-    get_darkfield=True,
+    get_darkfield=False,
     fitting_mode="approximate",
-    sort_intensity=False,
+    sort_intensity=True,
     max_reweight_iterations=5,
-    smoothness_flatfield=0.990265494633178,
+    smoothness_flatfield=9.90265494633178,
     smoothness_darkfield=0.098053098926636,
 )
 # basic.fit(fi_distorted)
 fi_distorted = fi_distorted - fi_distorted.min()
+# basic.autotune(
+#     images=fi_distorted,
+#     fitting_weight=~fi_seg,
+# )
 basic.fit(
     images=fi_distorted,
     fitting_weight=~fi_seg,
 )
-
 fig, axes = plt.subplots(1, 3, figsize=(9, 3))
 im = axes[0].imshow(basic.flatfield)
 fig.colorbar(im, ax=axes[0])

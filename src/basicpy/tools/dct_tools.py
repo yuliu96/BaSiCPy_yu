@@ -26,30 +26,23 @@ logger = logging.getLogger(__name__)
 class DCT(ABC):
     @abstractproperty
     @abstractmethod
-    def _backend(self) -> str:
-        ...
+    def _backend(self) -> str: ...
 
     @staticmethod
     @abstractmethod
-    def dct2d(arr: np.ndarray) -> np.ndarray:
-        ...
+    def dct2d(arr: np.ndarray) -> np.ndarray: ...
 
     @staticmethod
     @abstractmethod
-    def idct2d(arr: np.ndarray) -> np.ndarray:
-        ...
+    def idct2d(arr: np.ndarray) -> np.ndarray: ...
 
     @staticmethod
     @abstractmethod
-    def dct3d(arr: np.ndarray) -> np.ndarray:
-        ...
+    def dct3d(arr: np.ndarray) -> np.ndarray: ...
 
     @staticmethod
     @abstractmethod
-    def idct3d(arr: np.ndarray) -> np.ndarray:
-        ...
-
-
+    def idct3d(arr: np.ndarray) -> np.ndarray: ...
 
 
 class JaxDCT(DCT):
