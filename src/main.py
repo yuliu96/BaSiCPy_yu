@@ -45,7 +45,7 @@ basic = BaSiC(
     fitting_mode="approximate",
     sort_intensity=True,
     max_reweight_iterations=5,
-    smoothness_flatfield=9.90265494633178,
+    smoothness_flatfield=0.990265494633178,
     smoothness_darkfield=0.098053098926636,
 )
 # basic.fit(fi_distorted)
