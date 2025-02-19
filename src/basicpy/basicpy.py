@@ -198,6 +198,7 @@ class BaSiC(BaseModel):
     _sparse_cost_darkfield: float = PrivateAttr(None)
     _flatfield_small: float = PrivateAttr(None)
     _darkfield_small: float = PrivateAttr(None)
+    _converge_flag: bool = PrivateAttr(None)
 
     class Config:
         """Pydantic class configuration."""
@@ -288,6 +289,7 @@ class BaSiC(BaseModel):
         images: np.ndarray,
         fitting_weight: Optional[np.ndarray] = None,
         skip_shape_warning=False,
+        for_autotune=False,
     ) -> None:
         """Generate illumination correction profiles from images.
 
@@ -459,10 +461,11 @@ class BaSiC(BaseModel):
                 I_R,
             )
 
+            D_R = D_R + D_Z * S
+
             S = I_B.mean(axis=0) - D_R
             S = S / jnp.mean(S)  # flatfields
 
-            D_R = D_R + D_Z * S
             logger.debug(f"single-step optimization score: {norm_ratio}.")
             logger.debug(f"mean of S: {float(jnp.mean(S))}.")
             self._score = norm_ratio
@@ -517,9 +520,11 @@ class BaSiC(BaseModel):
                 if self._reweight_score <= self.reweighting_tol:
                     logger.info("Reweighting converged.")
                     break
-
+            self._converge_flag = 1
             if i == self.max_reweight_iterations - 1:
-                logger.warning("Reweighting did not converge.")
+                self._converge_flag = 0
+                if not for_autotune:
+                    logger.warning("Reweighting did not converge.")
             last_S = S
             last_D = D
 
@@ -781,12 +786,13 @@ class BaSiC(BaseModel):
         if init_params is None:
             init_params = {
                 "smoothness_flatfield": sum(flatfield_pool) / len(flatfield_pool),
-                "get_darkfield": False,
+                "get_darkfield": self.get_darkfield,
             }
             if self.get_darkfield:
                 init_params.update(
                     {
-                        "smoothness_darkfield": 0,
+                        "smoothness_darkfield": init_params["smoothness_flatfield"]
+                        * 0.1,
                         "sparse_cost_darkfield": 1e-3,
                     }
                 )
@@ -796,6 +802,7 @@ class BaSiC(BaseModel):
             images,
             fitting_weight=fitting_weight,
             skip_shape_warning=skip_shape_warning,
+            for_autotune=True,
         )
         transformed = basic.transform(images, timelapse=timelapse)
 
@@ -816,6 +823,7 @@ class BaSiC(BaseModel):
                     images,
                     fitting_weight=fitting_weight,
                     skip_shape_warning=skip_shape_warning,
+                    for_autotune=True,
                 )
                 transformed = basic.transform(images, timelapse=timelapse)
                 if np.isnan(transformed).sum():
@@ -837,7 +845,7 @@ class BaSiC(BaseModel):
                     weights=weights,
                 )
 
-                return r
+                return r if basic._converge_flag else np.inf
             except RuntimeError:
                 return np.inf
 
@@ -845,8 +853,8 @@ class BaSiC(BaseModel):
         for i in tqdm.tqdm(flatfield_pool_coarse, desc="coarse-level search: "):
             params = {
                 "smoothness_flatfield": i,
-                "smoothness_darkfield": 0,  # 0.1 * i if self.get_darkfield else 0
-                "get_darkfield": False,
+                "smoothness_darkfield": i * 0.1,  # 0.1 * i if self.get_darkfield else 0
+                "get_darkfield": self.get_darkfield,
             }
             a = fit_and_calc_entropy(params)
             cost_coarse.append(a)
@@ -864,6 +872,7 @@ class BaSiC(BaseModel):
                 second_best_ind = best_ind + 1
         best = flatfield_pool_coarse[best_ind]
         second_best = flatfield_pool_coarse[second_best_ind]
+
         if second_best < best:
             flatfield_pool_narrow = flatfield_pool[
                 (flatfield_pool >= second_best) * (flatfield_pool <= best)
@@ -883,14 +892,18 @@ class BaSiC(BaseModel):
         for i in tqdm.tqdm(flatfield_pool_narrow[1:-1], desc="fine-level search: "):
             params = {
                 "smoothness_flatfield": i,
-                "smoothness_darkfield": 0,
-                # "get_darkfield": False,
+                "smoothness_darkfield": i * 0.1,
+                "get_darkfield": self.get_darkfield,
             }
             a = fit_and_calc_entropy(params)
             cost_narrow[ind] = a
             ind += 1
         self.__dict__.update(
-            {"smoothness_flatfield": flatfield_pool_narrow[np.argmin(cost_narrow)]}
+            {
+                "smoothness_flatfield": flatfield_pool_narrow[np.argmin(cost_narrow)],
+                "smoothness_darkfield": flatfield_pool_narrow[np.argmin(cost_narrow)]
+                * 0.1,
+            }
         )
         if not self.get_darkfield:
             print("Autotune is done.")

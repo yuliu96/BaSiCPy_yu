@@ -388,6 +388,8 @@ class ApproximateFit(BaseFit):
         I_R = I_R[:, 0, ...].reshape(s_s, -1)
         Y = Y[:, 0, ...].reshape(s_s, -1)
 
+        S = idct2d(S_hat)
+
         I_B = S * B[:, newax, newax] + D_R[newax, ...]
         I_B = I_B.reshape(s_s, -1)
 
@@ -545,26 +547,26 @@ class ApproximateFit(BaseFit):
 
             D_Z = jnp.where(temp5 == 0, 0, (temp1 * temp3 - temp2 * temp4) / temp5)
             D_Z = jnp.maximum(D_Z, 0)
-            D_Z = jnp.minimum(D_Z, Im.min())
+            D_Z = jnp.minimum(D_Z, Im.min() / jnp.mean(S))
 
-            # Z = D_Z * jnp.mean(S) - D_Z * S.reshape(-1)
+            Z = D_Z * jnp.mean(S) - D_Z * S.reshape(-1)
 
             R_nan = jnp.where(validA1coeff_idx[:, None], R, jnp.nan)
 
-            A1_offset = jnp.nanmean(R_nan, 0) - jnp.nanmean(
-                B_nan[..., newax] * S.reshape(-1)[newax, ...],
-                0,
+            A1_offset = (
+                jnp.nanmean(R_nan, 0)
+                - jnp.nanmean(B_nan[..., newax]) * S.reshape(-1)[newax, ...]
             )
             A1_offset = A1_offset - jnp.nanmean(A1_offset)
             # D_R = A1_offset - jnp.nanmean(A1_offset) - Z
-            D_R = A1_offset - D_Z * (jnp.mean(S) - S.reshape(-1))
+            D_R = A1_offset - jnp.mean(A1_offset) - Z
 
             D_R = dct2d(D_R.reshape(s_m, s_n))
             D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
             D_R = idct2d(D_R)
             D_R = _jshrinkage(D_R, self.smoothness_darkfield / (self._ent2 * mu))
 
-            # D_R = D_R + D_Z
+            D_R = D_R + Z.reshape(s_m, s_n)
 
         fit_residual = Im - I_B - I_R
         Y = Y + mu * fit_residual
